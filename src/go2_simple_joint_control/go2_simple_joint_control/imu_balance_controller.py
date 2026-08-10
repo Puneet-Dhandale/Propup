@@ -8,16 +8,13 @@ import math
 
 class ImuBalanceController(Node):
     def __init__(self):
+        super().__init__('imu_balance_controller')
         self.roll_filtered_ = 0.0
         self.pitch_filtered_ = 0.0
-        super().__init__('imu_balance_controller')
         
         self.joint_sub_ = self.create_subscription(Float64MultiArray, '/gait_joint_commands', self.joint_callback, 10)
         self.imu_sub_ = self.create_subscription(Imu, '/trunk_imu', self.imu_callback, 10)
-        
-        # NEW: Listen to keyboard auxiliary commands to update target pitch
         self.aux_sub_ = self.create_subscription(Float64MultiArray, '/teleop_aux', self.aux_callback, 10)
-        
         self.joint_pub_ = self.create_publisher(Float64MultiArray, '/joint_commands', 10)
         
         self.l2_ = 0.213
@@ -30,7 +27,6 @@ class ImuBalanceController(Node):
         self.roll_vel_ = 0.0
         self.pitch_vel_ = 0.0
         
-        # The new IMU target
         self.target_pitch_ = 0.0
 
         self.kp_roll_  = 0.015
@@ -45,8 +41,10 @@ class ImuBalanceController(Node):
         sinr_cosp = 2.0 * (w * x + y * z)
         cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
         roll = math.atan2(sinr_cosp, cosr_cosp)
+        
         sinp = 2.0 * (w * y - z * x)
         pitch = math.asin(sinp) if abs(sinp) < 1.0 else math.copysign(math.pi / 2.0, sinp)
+        
         siny_cosp = 2.0 * (w * z + x * y)
         cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
         yaw = math.atan2(siny_cosp, cosy_cosp)
@@ -59,6 +57,8 @@ class ImuBalanceController(Node):
         qw = msg.orientation.w
         self.roll_, self.pitch_, _ = self.euler_from_quaternion(qx, qy, qz, qw)
         
+        # EMA filter. alpha = 0.8 introduces some phase lag, but a lower value
+        # let the high-frequency gazebo rigid body collisions shake the bot apart.
         alpha = 0.8
         self.roll_filtered_ = (alpha * self.roll_filtered_ + (1.0 - alpha) * self.roll_)
         self.pitch_filtered_ = (alpha * self.pitch_filtered_ + (1.0 - alpha) * self.pitch_)
@@ -67,7 +67,7 @@ class ImuBalanceController(Node):
         self.pitch_vel_ = msg.angular_velocity.y
 
     def aux_callback(self, msg):
-        """Updates the IMU's target pitch so it doesn't fight the user's keyboard commands."""
+        # stop the IMU from fighting the user's manual pitch commands
         if len(msg.data) >= 2:
             self.target_pitch_ = msg.data[1]
 
@@ -75,6 +75,7 @@ class ImuBalanceController(Node):
         D = self.leg_mirrors_[leg_index] * self.d_
         x_leg = self.l2_ * math.sin(theta2) + self.l3_ * math.sin(theta2 + theta3)
         z_leg = -self.l2_ * math.cos(theta2) - self.l3_ * math.cos(theta2 + theta3)
+        
         x = x_leg
         y = D * math.cos(theta1) - z_leg * math.sin(theta1)
         z = D * math.sin(theta1) + z_leg * math.cos(theta1)
@@ -101,7 +102,6 @@ class ImuBalanceController(Node):
         raw_joints = msg.data
         balanced_joints = []
 
-        # Target 0 roll, but target the USER'S desired pitch!
         roll_error = 0.0 - self.roll_filtered_
         pitch_error = self.target_pitch_ - self.pitch_filtered_
 
@@ -112,13 +112,10 @@ class ImuBalanceController(Node):
         pitch_correction = max(-self.max_correction_, min(self.max_correction_, pitch_correction))
 
         for i in range(4):
-            theta1 = raw_joints[3*i]
-            theta2 = raw_joints[3*i + 1]
-            theta3 = raw_joints[3*i + 2]
-
+            theta1, theta2, theta3 = raw_joints[3*i : 3*i+3]
             x, y, z = self.forward_kinematics(i, theta1, theta2, theta3)
 
-            side     = self.leg_mirrors_[i]
+            side = self.leg_mirrors_[i]
             is_front = i in (0, 1)
 
             roll_sign = -side
@@ -127,6 +124,7 @@ class ImuBalanceController(Node):
             dz = (roll_sign * roll_correction) + (pitch_sign * pitch_correction)
             z_target = z + dz
 
+            # prevent asking for a Z-height longer than the physical leg
             if abs(z_target) > (self.l2_ + self.l3_):
                 z_target = math.copysign(self.l2_ + self.l3_ - 1e-3, z_target)
 

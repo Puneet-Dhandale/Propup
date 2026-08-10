@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float64MultiArray
@@ -10,14 +12,10 @@ class GaitGenerator(Node):
         
         self.joint_pub = self.create_publisher(Float64MultiArray, '/gait_joint_commands', 10)
 
-        # NEW: Broadcasts which legs are in stance (1.0) vs swing (0.0), order [LF, RF, LR, RR]
-        # so stance_force_controller can avoid commanding ground-reaction force on a leg
-        # that is currently mid-air.
+        # broadcasts stance (1.0) vs swing (0.0) so force controller ignores mid-air legs
         self.phase_pub = self.create_publisher(Float64MultiArray, '/leg_stance_state', 10)
 
         self.vel_sub = self.create_subscription(Twist, '/cmd_vel', self.velocity_callback, 10)
-        
-        # NEW: Listen to the auxiliary keyboard commands (Pitch and Height)
         self.aux_sub = self.create_subscription(Float64MultiArray, '/teleop_aux', self.aux_callback, 10)
         
         self.timer_period = 0.02 
@@ -47,7 +45,7 @@ class GaitGenerator(Node):
         self.target_yaw_vel = msg.angular.z
 
     def aux_callback(self, msg):
-        """Captures height (r/f) and pitch (t/g) from the keyboard."""
+        # r/f for height, t/g for pitch
         if len(msg.data) >= 2:
             self.body_height_offset = msg.data[0]
             self.body_pitch_offset = msg.data[1]
@@ -59,6 +57,8 @@ class GaitGenerator(Node):
         
         dist = math.sqrt(max(x*x + y*y + z*z - D*D, 1e-6))
         cos_theta3 = (dist*dist - self.l2*self.l2 - self.l3*self.l3) / (2*self.l2*self.l3)
+        
+        # clamp to prevent python math domain error if IK target is physically out of reach
         cos_theta3 = max(-1.0, min(1.0, cos_theta3))
         theta3 = -math.acos(cos_theta3)
         
@@ -67,9 +67,7 @@ class GaitGenerator(Node):
         return [theta1, theta2, theta3]
 
     def get_local_phase(self, global_phase, is_left_leg, is_front_leg):
-        """Same offset logic used inside get_trot_foot_target, factored out so we
-        can also use it just to publish stance/swing state without recomputing
-        the whole foot trajectory."""
+        # offset logic factored out so stance controller knows when we are in the air
         offset = 0.0 if ((is_left_leg and is_front_leg) or (not is_left_leg and not is_front_leg)) else 0.5
         return (global_phase + offset) % 1.0
 
@@ -80,6 +78,7 @@ class GaitGenerator(Node):
         step_length_y = self.target_y_vel / self.gait_freq
         
         # AMPLIFIED Yaw logic to break physical friction and turn the robot
+        # Total hack relying on Gazebo flat-ground slip, wouldn't work on varied friction
         if is_left_leg:
             step_length_x -= (self.target_yaw_vel * 0.4)
         else:
@@ -88,10 +87,8 @@ class GaitGenerator(Node):
         x = 0.0
         y = self.d if is_left_leg else -self.d
         
-        # Apply Base Height offset
         z_base = -(self.stand_height + self.body_height_offset)
         
-        # Apply Kinematic Pitch offset
         if is_front_leg:
             z_base += self.body_pitch_offset
         else:
@@ -100,6 +97,8 @@ class GaitGenerator(Node):
         if abs(self.target_x_vel) < 0.01 and abs(self.target_y_vel) < 0.01 and abs(self.target_yaw_vel) < 0.01:
             return x, y, z_base
             
+        # TODO: switch to spline interpolation later, this raw sine wave causes 
+        # massive accel spikes (868 rad/s^2 logged) when passing through IK
         if local_phase < self.duty_factor:
             phi_s = local_phase / self.duty_factor
             x = (step_length_x / 2.0) - (step_length_x * phi_s)
@@ -131,17 +130,10 @@ class GaitGenerator(Node):
         msg.data = fl_joints + fr_joints + rl_joints + rr_joints
         self.joint_pub.publish(msg)
 
-        # Publish stance (1.0) / swing (0.0) state per leg, order [LF, RF, LR, RR]
-        # -- must match the leg ordering used in stance_force_controller.leg_mirrors_
         stance_state = []
         for is_left, is_front in [(True, True), (False, True), (True, False), (False, False)]:
             lp = self.get_local_phase(global_phase, is_left, is_front)
-            # A leg standing still (no commanded velocity) is always in stance --
-            # get_trot_foot_target() returns early with z_base in that case, so
-            # mirror that same "standing still" condition here.
-            standing_still = (abs(self.target_x_vel) < 0.01 and
-                               abs(self.target_y_vel) < 0.01 and
-                               abs(self.target_yaw_vel) < 0.01)
+            standing_still = (abs(self.target_x_vel) < 0.01 and abs(self.target_y_vel) < 0.01 and abs(self.target_yaw_vel) < 0.01)
             is_stance = standing_still or (lp < self.duty_factor)
             stance_state.append(1.0 if is_stance else 0.0)
 
