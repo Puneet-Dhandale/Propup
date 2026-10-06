@@ -1,17 +1,13 @@
-version: '3.8'
-
 services:
-  ros2_humble:
-    image: osrf/ros:humble-desktop
+  proboticists_ros2:
+    build: .
     container_name: proboticists_ros2
     stdin_open: true
     tty: true
     network_mode: host
     environment:
       - DISPLAY=${DISPLAY}
+    working_dir: /home/ros2_ws
     volumes:
-      - ./src:/home/ros2_ws/src
-      - ./build:/home/ros2_ws/build
-      - ./install:/home/ros2_ws/install
-      - ./log:/home/ros2_ws/log
+      - .:/home/ros2_ws
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
